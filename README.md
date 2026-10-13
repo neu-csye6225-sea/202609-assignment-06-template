@@ -153,9 +153,11 @@ A template is provided in the repo root. For each host, explain: the workload ch
 3. Rename `.github/workflows/deploy.yml.example` to `deploy.yml`.
 4. Commit and push. Watch the Actions tab — a successful run deploys both instances and commits the updated `terraform.tfstate` back to your repo.
 5. Submit on Gradescope (GitHub-linked submission).
-6. Once Gradescope confirms a pass, run `terraform destroy` to avoid ongoing charges.
+6. Once Gradescope confirms a pass, you can destroy your terraform resources.
+   a. First, you need to update your local repository with the updated `terraform.tfstate` file from the remote github repo. To do this, run `git pull`.
+   b. You can now run the the  `terraform destroy` to remove all of your terraform deployed resources from your AWS account.
 
-You may resubmit as many times as needed before the deadline. Please make sure all instances are terminated after you are completed (just check the AWS console).
+You may resubmit as many times as needed before the deadline, but always make sure you remove all resources before running Gradescope again.  Please make sure all instances are terminated after you are completed (just check the AWS console).
 
 ## Testing and Debugging with Terraform
 
@@ -236,6 +238,82 @@ terraform destroy
 
 You're welcome to run `terraform apply` locally to test end-to-end before pushing. Just keep in mind: whoever applies last "wins" and produces the `terraform.tfstate` that ends up committed. If you apply locally and then push, GitHub Actions will apply again (usually a no-op if nothing changed since your local apply) and will be the one to commit the resulting state file — that's expected, not a bug.
 
+---
+
+## Testing Your Deployment Manually
+
+Once `terraform apply` succeeds, you can check if everything is working manually.   These are the same checks the autograder runs, and running them yourself first will tell you exactly wh  ere to look if something's wrong.
+
+### 1. Get your IPs
+
+```bash
+terraform output api_public_ip
+terraform output worker_private_ip
+```
+
+### 2. Confirm the api host is up
+
+```bash
+curl http://<api_public_ip>/healthcheck
+```
+
+Expected: `{"status": "ok", "host": "api"}`
+
+If this fails, the problem is with the api host itself or `api_sg` — not yet a worker/network issue.
+
+### 3. Confirm the api host can reach the worker
+
+```bash
+curl "http://<api_public_ip>/check-private?target=<worker_private_ip>"
+```
+
+Expected: `{"status": "ok", "host": "worker"}`
+
+If step 2 passed but this times out or returns a 502, the api host itself is fine — the problem is specifically in the path between the two hosts. Check, in order: `work  er_sg`'s inbound rule (does it actually reference `api_sg`?), and `private_nacl`'s rules (both directions — remember NACLs are stateless).
+
+### 4. Confirm the worker's actual job endpoint works
+
+```bash
+curl "http://<api_public_ip>/check-batch?target=<worker_private_ip>"
+```
+
+Expected: `{"host": "worker", "a": 15, "b": 27, "result": 42}`
+
+This is exactly what Gradescope's last live check verifies. If step 3 passed but this doesn't, the network path is fine — something's wrong with the worker's `app.servic  e` itself.
+
+### 5. `nc` — isolating network problems from application problems
+
+If a `curl` hangs or fails and you're not sure whether it's a network issue (Security Group/NACL) or an application issue (service not running), The  `nc` command tests just the port  , with no application-level request involved:
+
+```bash
+nc -zv <worker_private_ip> 80
+```
+
+If `nc` says the port is open but `curl` still fails, the networking is fine — look at the application. If `nc` says the port is closed or times out, it's a Security Gro  up or NACL problem, not the app.
+
+### 6. SSH in directly, if you need to look closer
+
+You can SSH to the api host with your own key pair:
+
+```bash
+ssh -i <path-to-key>.pem ubuntu@<api_public_ip>
+```
+
+Since the worker has no public IP, reach it from your own machine in one step with `ssh -J` (`ProxyJump`).  Note that this doesn't always work between Ubuntu and Windows ssh version. YMMV. 
+
+```bash
+ssh -J ubuntu@<api_public_ip> ubuntu@<worker_private_ip>
+```
+
+Once connected to either host, useful commands for digging into a problem:
+
+```bash
+sudo systemctl status app.service      # is the service running?
+sudo journalctl -u app.service -n 50   # recent logs - did user_data or the app itself error out?
+curl http://localhost/healthcheck      # test the app locally, bypassing the network entirely
+```
+
+---
 
 ## Submission (Gradescope)
 
